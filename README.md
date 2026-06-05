@@ -12,17 +12,16 @@ It walks through five Courier API calls and prints the request + response for ea
 
 ## Requirements
 
-- Node 18+ (uses the built-in global `fetch`). There are **no dependencies** — `npm install` isn't needed.
+- Node 18+ (uses the built-in global `fetch`). The only dependency is **Jest** (dev) — run `npm install` once.
 
 ## Usage
 
 ```bash
-npm test
+npm install   # installs Jest (dev dependency)
+npm test      # runs the Jest test suite
 ```
 
-(or run it directly: `node tenant-delivery-test.js`)
-
-Each run uses a fresh random `user_id`.
+The flow lives in [tenant-delivery.test.js](tenant-delivery.test.js) as four ordered Jest steps (create → send → status → inbox). Each run uses a fresh random `user_id`.
 
 ## What you'll see (the tenant-scoping gap)
 
@@ -36,7 +35,7 @@ That's because the inbox-stored copy persists `accountId: null` (drop the `param
 
 ## Configuration
 
-The values are hardcoded at the top of [tenant-delivery-test.js](tenant-delivery-test.js):
+The values are hardcoded at the top of [tenant-delivery.test.js](tenant-delivery.test.js):
 
 ```js
 const API_KEY     = "pk_...";              // Courier API key

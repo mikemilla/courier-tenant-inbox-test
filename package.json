@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Single fetch-only script exercising the Courier tenant inbox flow (no SDK).",
   "scripts": {
-    "test": "node tenant-delivery-test.js"
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
   }
 }
