@@ -2,102 +2,63 @@
 
 A Jest suite that exercises the full Courier tenant inbox flow using **only `fetch`** — no SDK.
 
-Each scenario walks through these Courier API calls and prints the request + response for each:
+It walks the Courier API end-to-end and asserts the central question: **a message sent to a `user_id` within a tenant should be visible to a tenant-scoped inbox read, and a message sent without a tenant should not.**
 
-1. **Create a user** — `POST https://api.courier.com/profiles/{user_id}` with an email address.
-2. **Send** — `POST https://api.courier.com/send` to that `user_id`, with `context.tenant_id` (scenario A) or without it (scenario B).
-3. **Message status** — polls `GET https://api.courier.com/messages/{requestId}` until the message leaves the queue (`ENQUEUED → SENT`).
-4. **Issue a JWT** — `POST https://api.courier.com/auth/issue-token` for the user.
-5. **Get messages** — `POST https://inbox.courier.com/q` (inbox GraphQL), read with the tenant + user_id (the tenant passed in the GraphQL `params` as `accountId`, mapped from the tenant like `courier-react` does).
+The inbox is always read **with a tenant** (`params.accountId = tenantId`, exactly the way `courier-react` reads in a tenanted app — it maps its `tenantId` prop to `accountId`). What varies per scenario is **how the message was sent**:
+
+| Scenario | Sent to… | Read with… | Should see it? |
+|----------|----------|------------|:--------------:|
+| **A** | user_id, tagged with tenant | tenant + user_id | **yes** (`totalCount: 1`) |
+| **B** | user_id, no tenant | tenant + user_id | **no** (`totalCount: 0`) |
+| **C** | tenant broadcast (no user_id) | tenant + user_id | **yes** (`totalCount: 1`) |
+| **D** | tenant broadcast (no user_id) | user_id only (no tenant) | **no** (`totalCount: 0`) |
+
+Scenarios C/D send to a whole tenant (`to: { tenant_id }`, no `user_id`); the receiving user is a tenant member (`PUT /users/{id}/tenants/{tenant}`).
+
+## Environment
+
+All config lives in [courier-helpers.js](courier-helpers.js) and **defaults to the shared DEV environment**. Override per-run with env vars:
+
+| Var | Default (dev) |
+|-----|---------------|
+| `COURIER_ENV` | `dev` (set `prod` for production) |
+| `COURIER_API_URL` | `https://1m5q00wehc…/dev` (Client REST) |
+| `COURIER_INBOX_URL` | `https://hfyaspnct6…/dev/q` (Inbox GraphQL) |
+| `COURIER_API_KEY`, `COURIER_TEMPLATE_ID`, `COURIER_TENANT_ID`, `COURIER_EMAIL` | dev workspace values |
 
 ## Requirements
 
-- Node 18+ (uses the built-in global `fetch`). The only dependency is **Jest** (dev) — run `npm install` once.
+- Node 18+ (built-in `fetch`). The only dependency is **Jest** (dev) — run `npm install` once.
 
 ## Usage
 
 ```bash
-npm install   # installs Jest (dev dependency)
-npm test      # runs the Jest test suite
+npm install
+npm test                 # runs the full suite against shared dev
+COURIER_ENV=prod npm test   # run against production instead
 ```
 
-The two **core** files cover the central question — each always **reads the inbox with a tenant + user_id** (`params.accountId = tenantId`, the way `courier-react` reads in a tenanted app) and varies **how the message was sent**. Each scenario uses its own fresh random `user_id`:
+## Test files
 
-- [tenant-delivery.test.js](tenant-delivery.test.js) — the raw flow (create → send → status → tenant+user read).
-- [courier-react-parity.test.js](courier-react-parity.test.js) — same flow, but issues the inbox read **byte-identically to `courier-react`** (query builder, `tenantId → accountId` map, endpoint, JWT + `x-courier-client-key` + `x-courier-client-source-id` headers) and runs it live.
+- [tenant-inbox.test.js](tenant-inbox.test.js) — the whole suite, one file:
+  - **Scenario A** — create → send WITH tenant → status → tenant+user read sees it (`1`).
+  - **Scenario B** — same flow sent WITHOUT a tenant → tenant+user read does not see it (`0`).
+  - **Scenario C** — broadcast to the tenant (no user_id) → tenant+user read sees it (`1`).
+  - **Scenario D** — broadcast to the tenant (no user_id) → user-only read (no tenant) does not see it (`0`).
+  - **Feature surface** (no-tenant path): read/unread, archive, pagination (`limit` + `after`/`pageInfo`), and invalid-JWT rejection.
+- [courier-helpers.js](courier-helpers.js) — shared config + helpers (`createUser`, `send`, `pollStatus`, `userJwt`, `readInbox`, `inboxTrack`), grounded in `@trycourier/courier-js`.
 
-Four more files broaden coverage (isolation, send-path diagnostics, read completeness, feature surface) — see [Additional coverage](#additional-coverage) below.
+## Status
 
-## Expected behavior
+Latest run against shared dev: **7 of 8 passed.** Scenarios A, B, **C**, and the four feature tests pass; **scenario D fails** (read count = 1, expected 0) — see the `tenantFiltering` note below.
 
-| Scenario | Sent with… | Read with… | Should see it? |
-|----------|------------|------------|:--------------:|
-| **A** | tenant + user_id | tenant + user_id | **yes** (`totalCount: 1`) |
-| **B** | user_id only (no tenant) | tenant + user_id | **no** (`totalCount: 0`) |
+Scenario A was the original failure (now fixed). The message was tagged to the tenant at the message level, but the **inbox-stored copy persisted `accountId: null`**, so the `params.accountId` filter matched nothing. Root cause and fix (backend branch `mike/c-inbox-tenant-accountid-ingest`):
 
-A tenant inbox should show messages addressed to that tenant, and should not show messages that were sent without one.
+This previously failed scenario A: the message was tagged to the tenant at the message level, but the **inbox-stored copy persisted `accountId: null`**, so the `params.accountId` filter matched nothing. Root cause and fix (backend branch `mike/c-inbox-tenant-accountid-ingest`):
 
-## What you'll see (the tenant-scoping gap)
+1. The send context's `accountId` was sourced only from the resolved **account object** (`account?.accountId`), which is `null` when the tenant isn't materialized as an account object — even though the message carries `context.tenant_id`. Fixed by falling back to the customer tenant id and threading `context.accountId` through `DeliveryHandlerParams` into the inbox send ([prepare-from-template-message.ts](../backend/send/worker/commands/prepare/prepare-from-template-message.ts), [prepare-from-content-message.ts](../backend/send/worker/commands/prepare/prepare-from-content-message.ts), [get-delivery-handler-params.ts](../backend/send/worker/provider-render/get-delivery-handler-params.ts), [providers/types.ts](../backend/providers/types.ts)).
+2. [providers/courier/send.ts](../backend/providers/courier/send.ts) gated the modern `sendV2` (`/inbox`, which forwards `accountId`) on `taxonomy === "inbox:courier"`, but inbox channels render with a wildcard taxonomy (`inbox:*`), so inbox sends fell to the legacy `sendV1` (`/send`) path that drops `accountId`. Fixed to match `taxonomy.includes("inbox")`.
 
-Latest run (`npm test`, 2026-06-05) — **2 passed, 2 failed (4 total)**:
+Deployed to shared dev: `ActionWorker`, `ProviderRenderStreamWorker`, `ProviderSendStreamWorker`.
 
-| Scenario | Expected | Actual | Status |
-|----------|:--------:|:------:|--------|
-| **A** — sent WITH tenant → tenant+user read *should* see it | `totalCount: 1` | `totalCount: 0` | ❌ **fail (the gap)** |
-| **B** — sent WITHOUT tenant → tenant+user read should *not* see it | `totalCount: 0` | `totalCount: 0` | ✅ pass |
-
-Both test files agree (one A + one B each → 2 fail, 2 pass).
-
-The message-status poll confirms scenario A's message **is** tagged to the tenant at the message level (`accountId: "sample-tenant"`). But the tenant+user read still returns `0`, because the **inbox-stored copy persists `accountId: null`** — so the `params.accountId = sample-tenant` filter matches nothing. (Scenario B happens to pass for the same underlying reason: its message also stores `accountId: null`, and the tenant filter correctly excludes it.)
-
-So the Send pipeline associates the message with the tenant, but **inbox ingest doesn't carry `accountId` through** for Send-API/template messages. Scenario A is an intentional **known-failing** assertion — it encodes the desired behavior and serves as a regression check for when inbox ingest propagates `accountId`.
-
-## Additional coverage
-
-Beyond the two core scenarios above, the suite covers the wider tenant-inbox contract. Shared helpers live in [courier-helpers.js](courier-helpers.js) (grounded in `@trycourier/courier-js`: the inbox read query, the `read`/`unread`/`archive` `TrackEvent` mutations, the `FilterParamsInput` fields, and the headers).
-
-### Isolation — the core tenant guarantee · [tenant-isolation.test.js](tenant-isolation.test.js)
-
-| # | Scenario | Expected |
-|---|----------|:--------:|
-| 1 | Sent to tenant **T1**, read with tenant **T2** | `0` — no cross-tenant leak |
-| 2 | Sent to **userA** + tenant, read as **userB** + tenant | `0` — user isolation |
-| 3 | userA's JWT but `x-courier-user-id: userB` | no rows returned — header can't override the JWT |
-
-These assert the *negative* (must not leak). They pass today partly because of the `accountId: null` ingest gap, but remain the correct guards once that gap is fixed.
-
-### Send-path diagnostic · [send-paths.test.js](send-paths.test.js)
-
-Probes whether **any** way of tagging the tenant at send time persists `accountId` on the inbox copy — `context.tenant_id`, `to.tenant_id`, and user→tenant **membership** (`PUT /users/{id}/tenants/{tenant}`). For each it reports `status.accountId`, the **stored** `node.accountId` (read with no filter), and the tenant read count. If any path stores a non-null `accountId`, that's the fix/workaround for the gap.
-
-### Read completeness · [inbox-completeness.test.js](inbox-completeness.test.js)
-
-| # | Scenario | Expected | Note |
-|---|----------|:--------:|------|
-| 4 | Sent WITH tenant, read with **no** tenant filter | `0` | Chosen contract: an untenanted read excludes tenant messages. Known-failing today (returns 1). |
-| 5 | **2** messages to one user + tenant, tenant read | `2` | Counting. Known-failing today (returns 0). |
-| 6 | One user in **two** tenants, read each | `1` each, only its own | Known-failing today (returns 0). |
-
-### Feature surface · [inbox-features.test.js](inbox-features.test.js)
-
-Exercised on the **working** (no-tenant) path so they're independent of the scoping gap:
-
-- **read / unread** — `TrackEvent` `read`/`unread` mutation toggles `node.read` and the `status: read|unread` filter.
-- **archive** — archived messages leave the default list and appear under `params.archived: true`.
-- **pagination** — `limit` + `after` cursor walks the list via `pageInfo.startCursor` / `hasNextPage`.
-- **auth** — an invalid JWT returns no rows (rejected).
-
-> The tenant-positive cases (#4–6, isolation post-fix) are **known-failing** regression checks tied to the same `accountId` ingest gap; the feature and isolation-negative cases are expected to pass. Run `npm test` for the current live results.
-
-## Configuration
-
-The values are hardcoded at the top of [tenant-delivery.test.js](tenant-delivery.test.js):
-
-```js
-const API_KEY     = "pk_...";              // Courier API key
-const TEMPLATE_ID = "nt_...";              // notification template
-const TENANT_ID   = "sample-tenant";       // tenant the send is scoped to
-const EMAIL       = "mike@courier.com";    // email added to the created user
-```
-
-Edit them in place to point at a different key, template, tenant, or email.
+> **Scenario D and the `tenantFiltering` contract.** D asserts that an **untenanted read** (no `accountId`) does *not* surface tenant-scoped messages. That contract depends on the workspace's inbox provider `tenantFiltering` config, which is **off** on shared dev — so an untenanted read currently returns all of a user's messages including tenant-scoped ones, and D reads back `1` instead of `0`. D is kept as a **known-failing** regression check encoding the desired contract; it will pass once `tenantFiltering` is enabled on the workspace's inbox provider.
