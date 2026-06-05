@@ -2,13 +2,13 @@
 
 A Jest suite that exercises the full Courier tenant inbox flow using **only `fetch`** — no SDK.
 
-It walks through these Courier API calls and prints the request + response for each:
+Each scenario walks through these Courier API calls and prints the request + response for each:
 
 1. **Create a user** — `POST https://api.courier.com/profiles/{user_id}` with an email address.
-2. **Send** — `POST https://api.courier.com/send` to that `user_id` with `context.tenant_id`.
+2. **Send** — `POST https://api.courier.com/send` to that `user_id`, with `context.tenant_id` (scenario A) or without it (scenario B).
 3. **Message status** — polls `GET https://api.courier.com/messages/{requestId}` until the message leaves the queue (`ENQUEUED → SENT`).
-4. **Issue a JWT** — `POST https://api.courier.com/auth/issue-token`, then logs and decodes the token.
-5. **Get messages** — `POST https://inbox.courier.com/q` (inbox GraphQL), scoped to the user (JWT + `x-courier-user-id`) and the tenant (passed in the GraphQL `params` as `accountId`, mapped from the tenant like `courier-react` does).
+4. **Issue a JWT** — `POST https://api.courier.com/auth/issue-token` for the user.
+5. **Get messages** — `POST https://inbox.courier.com/q` (inbox GraphQL), read with the tenant + user_id (the tenant passed in the GraphQL `params` as `accountId`, mapped from the tenant like `courier-react` does).
 
 ## Requirements
 
@@ -21,26 +21,34 @@ npm install   # installs Jest (dev dependency)
 npm test      # runs the Jest test suite
 ```
 
-There are two test files, each a set of ordered Jest steps sharing a fresh random `user_id` per run:
+There are two test files. Each always **reads the inbox with a tenant + user_id** (`params.accountId = tenantId`, the way `courier-react` reads in a tenanted app) and varies **how the message was sent**. Each scenario uses its own fresh random `user_id`:
 
-- [tenant-delivery.test.js](tenant-delivery.test.js) — the raw flow: create → send → status → tenant-scoped read → non-tenant read.
-- [courier-react-parity.test.js](courier-react-parity.test.js) — issues the inbox read **byte-identically to `courier-react`** (query builder, `tenantId → accountId` map, endpoint, JWT + `x-courier-client-key` + `x-courier-client-source-id` headers), then runs it live.
+- [tenant-delivery.test.js](tenant-delivery.test.js) — the raw flow (create → send → status → tenant+user read).
+- [courier-react-parity.test.js](courier-react-parity.test.js) — same flow, but issues the inbox read **byte-identically to `courier-react`** (query builder, `tenantId → accountId` map, endpoint, JWT + `x-courier-client-key` + `x-courier-client-source-id` headers) and runs it live.
+
+## Expected behavior
+
+| Scenario | Sent with… | Read with… | Should see it? |
+|----------|------------|------------|:--------------:|
+| **A** | tenant + user_id | tenant + user_id | **yes** (`totalCount: 1`) |
+| **B** | user_id only (no tenant) | tenant + user_id | **no** (`totalCount: 0`) |
+
+A tenant inbox should show messages addressed to that tenant, and should not show messages that were sent without one.
 
 ## What you'll see (the tenant-scoping gap)
 
-The message-status call shows the message tagged to the tenant — `accountId: "sample-tenant"` — and routed to the `inbox` channel. But a **tenant-scoped** inbox read returns nothing, while the **same read without a tenant filter** returns the message. That inverts what tenant scoping should do:
+Latest run (`npm test`, 2026-06-05) — **2 passed, 2 failed (4 total)**:
 
-| Read | Expected | Actual | Status |
-|------|:--------:|:------:|--------|
-| Message status (Send pipeline tags the tenant) | `accountId: sample-tenant` | `accountId: sample-tenant` | ✅ pass |
-| Tenant-scoped read (`params.accountId = sample-tenant`) — *should* see the tenant's message | `totalCount: 1` | `totalCount: 0` | ❌ **fail (the gap)** |
-| Non-tenant read (no `accountId` filter) — *should not* see a tenant-scoped message | `totalCount: 0` | `totalCount: 1` | ❌ **fail (the gap)** |
-| `courier-react` parity, `tenantId = sample-tenant` (request shape matches exactly) | `totalCount: 1` | `totalCount: 0` | ❌ **fail (the gap)** |
-| `courier-react` parity, no tenant (endpoint/JWT/client-key sanity) | `totalCount: 1` | `totalCount: 1` | ✅ pass |
+| Scenario | Expected | Actual | Status |
+|----------|:--------:|:------:|--------|
+| **A** — sent WITH tenant → tenant+user read *should* see it | `totalCount: 1` | `totalCount: 0` | ❌ **fail (the gap)** |
+| **B** — sent WITHOUT tenant → tenant+user read should *not* see it | `totalCount: 0` | `totalCount: 0` | ✅ pass |
 
-The tenant-scoped reads fail because the inbox-stored copy persists `accountId: null` (drop the `params.accountId` filter and the same message comes back with `accountId: null`). So even though the Send pipeline associates the message with the tenant at the message level, the inbox ingest doesn't carry `accountId` through for Send-API/template messages — a tenant-scoped read therefore finds nothing, and an unscoped read finds it anyway.
+Both test files agree (one A + one B each → 2 fail, 2 pass).
 
-The ❌ rows are intentional **known-failing** assertions: they encode the desired behavior and serve as a regression check for when inbox ingest carries `accountId` through.
+The message-status poll confirms scenario A's message **is** tagged to the tenant at the message level (`accountId: "sample-tenant"`). But the tenant+user read still returns `0`, because the **inbox-stored copy persists `accountId: null`** — so the `params.accountId = sample-tenant` filter matches nothing. (Scenario B happens to pass for the same underlying reason: its message also stores `accountId: null`, and the tenant filter correctly excludes it.)
+
+So the Send pipeline associates the message with the tenant, but **inbox ingest doesn't carry `accountId` through** for Send-API/template messages. Scenario A is an intentional **known-failing** assertion — it encodes the desired behavior and serves as a regression check for when inbox ingest propagates `accountId`.
 
 ## Configuration
 

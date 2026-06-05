@@ -1,13 +1,14 @@
 // Courier tenant inbox delivery test — uses only `fetch` (no SDK).
 //
-// Integration test exercising the full Courier tenant inbox flow as ordered Jest steps:
-// 1. Creates a user via the Courier API with an email address.
-// 2. Sends the template to that user_id with tenant context.
-// 3. Polls the Messages API until the message leaves the queue.
-// 4. Issues a JWT for the user (tenant-scoped and non-tenant) and fetches the inbox.
+// Verifies tenant scoping of the inbox. The inbox is always read WITH a tenant +
+// user_id (params.accountId = tenantId, the way courier-react reads in a tenanted
+// app). What varies is how the message was SENT:
 //
-// These steps run in order and share state — each depends on the previous one.
-// Run with: npm test
+//   A. Sent WITH tenant + user_id  -> the tenant+user read SHOULD see it    (1)
+//   B. Sent WITHOUT tenant (user_id only) -> the tenant+user read should NOT see it (0)
+//
+// Each scenario uses its own fresh user so the two don't cross-contaminate.
+// Run with: npm test  (or: npx jest tenant-delivery.test.js)
 
 const API_KEY = "pk_CRRRYD4XM9MV6MM8VCG66FXJNDH0";
 const TEMPLATE_ID = "nt_01ktc9s2gtf6bv471bjp2af1r4";
@@ -23,140 +24,103 @@ const query = `query GetInboxMessages($params: FilterParamsInput, $limit: Int = 
   }
 }`;
 
-// Issues a JWT for the given scope, then fetches the inbox. Returns the message
-// totalCount. Logs request/response for both calls.
-async function issueAndFetch(userId, label, scope) {
-  console.log(`\n===== ${label} =====`);
-  console.log("ISSUE REQUEST  POST https://api.courier.com/auth/issue-token");
-  const tokenBody = { scope, expires_in: "1 day" };
-  console.log("body:", J(tokenBody));
-  const tokenRes = await fetch("https://api.courier.com/auth/issue-token", {
+// Create the user (merge profile) with an email address.
+async function createUser(userId) {
+  const res = await fetch(`https://api.courier.com/profiles/${userId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-    body: JSON.stringify(tokenBody),
+    body: JSON.stringify({ profile: { email: EMAIL } }),
   });
-  const { token: jwt } = await tokenRes.json();
-  const [, payload] = jwt.split(".");
-  console.log(`ISSUE RESPONSE (HTTP ${tokenRes.status}) decoded:`, J(JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))));
+  console.log(`CREATE USER ${userId} -> HTTP ${res.status}`);
+  if (res.status !== 200) throw new Error(`create user failed: HTTP ${res.status}`);
+}
 
-  const variables = { params: {}, limit: 50 };
-  console.log("GET MESSAGES REQUEST  POST https://inbox.courier.com/q");
-  console.log("headers:", J({ "x-courier-user-id": userId, Authorization: "Bearer <jwt>" }));
-  console.log("body:", J({ query, variables }));
-  const inboxRes = await fetch("https://inbox.courier.com/q", {
+// Send the template to the user. Includes context.tenant_id only when withTenant.
+async function send(userId, withTenant) {
+  const message = {
+    to: { user_id: userId },
+    template: TEMPLATE_ID,
+    ...(withTenant ? { context: { tenant_id: TENANT_ID } } : {}),
+  };
+  const res = await fetch("https://api.courier.com/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ message }),
+  });
+  const json = await res.json();
+  console.log(`SEND (withTenant=${withTenant}) -> HTTP ${res.status}`, J(json));
+  if (res.status !== 202) throw new Error(`send failed: HTTP ${res.status}`);
+  return json.requestId;
+}
+
+// Poll the Messages API until the message leaves the queue.
+async function pollStatus(requestId) {
+  let statusJson;
+  for (let attempt = 1; attempt <= 15; attempt++) {
+    const res = await fetch(`https://api.courier.com/messages/${requestId}`, {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    });
+    statusJson = await res.json();
+    console.log(`  status attempt ${attempt}: HTTP ${res.status} status=${statusJson.status} accountId=${statusJson.accountId}`);
+    if (["SENT", "DELIVERED", "OPENED", "CLICKED"].includes(statusJson.status)) break;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return statusJson;
+}
+
+// Issue a user-scoped JWT (no tenant in the scope; the tenant is applied at read
+// time via params.accountId, like courier-react).
+async function issueUserJwt(userId) {
+  const scope = [`user_id:${userId}`, "inbox:read:messages"].join(" ");
+  const res = await fetch("https://api.courier.com/auth/issue-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
+    body: JSON.stringify({ scope, expires_in: "1 day" }),
+  });
+  const { token } = await res.json();
+  return token;
+}
+
+// Fetch the inbox WITH tenant + user_id: params.accountId = tenantId.
+async function fetchInboxWithTenant(userId, jwt) {
+  const variables = { params: { accountId: TENANT_ID }, limit: 50 };
+  const res = await fetch("https://inbox.courier.com/q", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-courier-user-id": userId, Authorization: `Bearer ${jwt}` },
     body: JSON.stringify({ query, variables }),
   });
-  const inboxJson = await inboxRes.json();
-  console.log(`GET MESSAGES RESPONSE  (HTTP ${inboxRes.status}):`, J(inboxJson));
-  return { status: inboxRes.status, jwt, totalCount: inboxJson?.data?.messages?.totalCount };
+  const json = await res.json();
+  console.log(`GET MESSAGES (tenant+user read) -> HTTP ${res.status}:`, J(json));
+  return { status: res.status, totalCount: json?.data?.messages?.totalCount };
 }
 
-describe("Courier tenant inbox delivery flow", () => {
-  // Shared state across the ordered steps. A fresh random user_id per run.
+// Runs the full flow for one scenario and returns the tenant+user inbox count.
+async function runScenario(withTenant) {
   const userId = `user-and-tenant-${Math.floor(Math.random() * 1e9)}`;
-  let requestId;
-  let statusJson;
+  console.log(`\n===== SCENARIO sent ${withTenant ? "WITH" : "WITHOUT"} tenant | userId=${userId} =====`);
+  await createUser(userId);
+  const requestId = await send(userId, withTenant);
+  const status = await pollStatus(requestId);
+  // Give OpenSearch a moment to index the inbox copy.
+  await new Promise((r) => setTimeout(r, 6000));
+  const jwt = await issueUserJwt(userId);
+  const read = await fetchInboxWithTenant(userId, jwt);
+  console.log(`RESULT: sent ${withTenant ? "WITH" : "WITHOUT"} tenant -> tenant+user read count = ${read.totalCount}`);
+  return { userId, status, ...read };
+}
 
-  test("1. creates the user with an email address", async () => {
-    console.log(`===== CREATE USER | userId=${userId} =====`);
-    console.log("CREATE REQUEST  POST https://api.courier.com/profiles/" + userId);
-    const createBody = { profile: { email: EMAIL } };
-    console.log("body:", J(createBody));
-    const createRes = await fetch(`https://api.courier.com/profiles/${userId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify(createBody),
-    });
-    const createJson = await createRes.json();
-    console.log(`CREATE RESPONSE  (HTTP ${createRes.status}):`, J(createJson));
-    expect(createRes.status).toBe(200);
-  });
+describe("Courier tenant inbox scoping", () => {
+  test("A. a message sent WITH tenant + user_id is visible to a tenant + user_id read", async () => {
+    const r = await runScenario(true);
+    expect(r.status).toBe(200);
+    // DESIRED: a tenant+user read sees the tenant-scoped message.
+    expect(r.totalCount).toBe(1);
+  }, 90_000);
 
-  test("2. sends the template to the user with tenant context", async () => {
-    const message = {
-      to: { user_id: userId },
-      context: { tenant_id: TENANT_ID },
-      template: TEMPLATE_ID,
-    };
-    console.log(`\n===== SEND | to user_id + tenant =====`);
-    console.log("SEND REQUEST  POST https://api.courier.com/send");
-    console.log("body:", J({ message }));
-    const sendRes = await fetch("https://api.courier.com/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify({ message }),
-    });
-    const sendJson = await sendRes.json();
-    console.log(`SEND RESPONSE  (HTTP ${sendRes.status}):`, J(sendJson));
-    requestId = sendJson.requestId;
-    expect(sendRes.status).toBe(202);
-    expect(requestId).toEqual(expect.any(String));
-  });
-
-  test("3. polls message status until it leaves the queue", async () => {
-    console.log(`\n===== MESSAGE STATUS =====`);
-    console.log(`STATUS REQUEST  GET https://api.courier.com/messages/${requestId}`);
-    for (let attempt = 1; attempt <= 15; attempt++) {
-      const statusRes = await fetch(`https://api.courier.com/messages/${requestId}`, {
-        headers: { Authorization: `Bearer ${API_KEY}` },
-      });
-      statusJson = await statusRes.json();
-      console.log(`  attempt ${attempt}: HTTP ${statusRes.status} status=${statusJson.status}`);
-      if (["SENT", "DELIVERED", "OPENED", "CLICKED"].includes(statusJson.status)) break;
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    console.log("STATUS RESPONSE (summary):", J({
-      id: statusJson.id,
-      status: statusJson.status,
-      accountId: statusJson.accountId,
-      enqueued: statusJson.enqueued,
-      sent: statusJson.sent,
-      channels: (statusJson.providers ?? []).map((p) => ({
-        channel: p.channel?.name,
-        provider: p.provider,
-        statusCode: p.providerResponse?.providerResponse?.statusCode,
-      })),
-    }));
-    expect(["SENT", "DELIVERED", "OPENED", "CLICKED"]).toContain(statusJson.status);
-    // The message is tagged to the tenant at the message level.
-    expect(statusJson.accountId).toBe(TENANT_ID);
-  }, 60_000); // polling can take up to ~30s (15 attempts × 2s)
-
-  test("4. a tenant-scoped JWT sees the user's tenant message (1)", async () => {
-    const tenantScoped = await issueAndFetch(
-      userId,
-      "TENANT-SCOPED JWT (tenant_id in scope)",
-      [`user_id:${userId}:${TENANT_ID}`, "inbox:read:messages", `tenant_id:${TENANT_ID}`, `account_id:${TENANT_ID}`].join(" ")
-    );
-
-    console.log(`\n===== RESULT =====`);
-    console.log(`tenant-scoped JWT  -> message count = ${tenantScoped.totalCount}`);
-
-    expect(tenantScoped.status).toBe(200);
-    // KNOWN-FAILING (desired behavior): a tenant-scoped read should return the
-    // user's tenant message. Today it returns 0 because the inbox-stored copy
-    // persists accountId: null, so the account_id filter matches nothing. This
-    // assertion is a regression check for when inbox ingest carries accountId through.
-    expect(tenantScoped.totalCount).toBe(1);
-  });
-
-  test("5. a non-tenant JWT sees no tenant-scoped messages (0)", async () => {
-    const nonTenant = await issueAndFetch(
-      userId,
-      "NON-TENANT JWT (no tenant_id in scope)",
-      [`user_id:${userId}`, "inbox:read:messages"].join(" ")
-    );
-
-    console.log(`\n===== RESULT =====`);
-    console.log(`non-tenant JWT     -> message count = ${nonTenant.totalCount}`);
-
-    expect(nonTenant.status).toBe(200);
-    // KNOWN-FAILING (desired behavior): a non-tenant read should NOT see the
-    // tenant's message. Today it returns 1 because the inbox-stored copy has
-    // accountId: null and the unscoped read applies no account filter. Regression
-    // check for when inbox ingest carries accountId through.
-    expect(nonTenant.totalCount).toBe(0);
-  });
+  test("B. a message sent WITHOUT tenant (user_id only) is NOT visible to a tenant + user_id read", async () => {
+    const r = await runScenario(false);
+    expect(r.status).toBe(200);
+    // DESIRED: a tenant+user read does NOT see a message that was sent without a tenant.
+    expect(r.totalCount).toBe(0);
+  }, 90_000);
 });
