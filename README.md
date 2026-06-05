@@ -6,8 +6,9 @@ It walks through four Courier API calls and prints the request + response for ea
 
 1. **Create a user** — `POST https://api.courier.com/profiles/{user_id}` with an email address.
 2. **Send** — `POST https://api.courier.com/send` to that `user_id` with `context.tenant_id`.
-3. **Issue a JWT** — `POST https://api.courier.com/auth/issue-token`, then logs and decodes the token.
-4. **Get messages** — `POST https://inbox.courier.com/q` (inbox GraphQL) for that user.
+3. **Message status** — polls `GET https://api.courier.com/messages/{requestId}` until the message leaves the queue (`ENQUEUED → SENT`).
+4. **Issue a JWT** — `POST https://api.courier.com/auth/issue-token`, then logs and decodes the token.
+5. **Get messages** — `POST https://inbox.courier.com/q` (inbox GraphQL) for that user.
 
 ## Requirements
 

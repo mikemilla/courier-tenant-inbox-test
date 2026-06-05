@@ -46,8 +46,31 @@ const sendJson = await sendRes.json();
 console.log(`SEND RESPONSE  (HTTP ${sendRes.status}):`, J(sendJson));
 const requestId = sendJson.requestId;
 
-// Give Courier a few seconds to route the message to the inbox.
-await new Promise((r) => setTimeout(r, 10000));
+// 2.5 Poll the message status via the Messages API until it leaves the queue.
+console.log(`\n===== MESSAGE STATUS =====`);
+console.log(`STATUS REQUEST  GET https://api.courier.com/messages/${requestId}`);
+let statusJson;
+for (let attempt = 1; attempt <= 15; attempt++) {
+  const statusRes = await fetch(`https://api.courier.com/messages/${requestId}`, {
+    headers: { Authorization: `Bearer ${API_KEY}` },
+  });
+  statusJson = await statusRes.json();
+  console.log(`  attempt ${attempt}: HTTP ${statusRes.status} status=${statusJson.status}`);
+  if (["SENT", "DELIVERED", "OPENED", "CLICKED"].includes(statusJson.status)) break;
+  await new Promise((r) => setTimeout(r, 2000));
+}
+console.log("STATUS RESPONSE (summary):", J({
+  id: statusJson.id,
+  status: statusJson.status,
+  accountId: statusJson.accountId,
+  enqueued: statusJson.enqueued,
+  sent: statusJson.sent,
+  channels: (statusJson.providers ?? []).map((p) => ({
+    channel: p.channel?.name,
+    provider: p.provider,
+    statusCode: p.providerResponse?.providerResponse?.statusCode,
+  })),
+}));
 
 // 3. Issue a JWT for the user, log it, and decode it.
 const scope = [`user_id:${userId}`, "inbox:read:messages", "read:brands", "read:preferences"].join(" ");
