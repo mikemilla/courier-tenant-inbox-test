@@ -90,21 +90,28 @@ const [, payload] = jwt.split(".");
 const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 console.log("decoded payload:", J(decoded));
 
-// 4. Fetch the user's inbox from the inbox GraphQL API.
-const query = `query GetInboxMessages($params: FilterParamsInput = {}, $limit: Int = 50) {
+// 4. Fetch the user's inbox from the inbox GraphQL API, scoped to the user (JWT +
+//    x-courier-user-id header) and the tenant. Like courier-react, the tenant is
+//    passed in the GraphQL `params` as `accountId` (params is a FilterParamsInput).
+const query = `query GetInboxMessages($params: FilterParamsInput, $limit: Int = 50) {
   messages(params: $params, limit: $limit) {
     totalCount
     nodes { messageId accountId title preview created }
   }
 }`;
+const variables = {
+  // [HACK] map tenantId to accountId in order to keep this backwards compatible
+  params: { accountId: TENANT_ID },
+  limit: 50,
+};
 
 console.log(`\n===== GET MESSAGES (expecting ${requestId}) =====`);
 console.log("GET MESSAGES REQUEST  POST https://inbox.courier.com/q");
 console.log("headers:", J({ "x-courier-user-id": userId, Authorization: "Bearer <jwt>" }));
-console.log("body:", J({ query }));
+console.log("body:", J({ query, variables }));
 const inboxRes = await fetch("https://inbox.courier.com/q", {
   method: "POST",
   headers: { "Content-Type": "application/json", "x-courier-user-id": userId, Authorization: `Bearer ${jwt}` },
-  body: JSON.stringify({ query }),
+  body: JSON.stringify({ query, variables }),
 });
 console.log(`GET MESSAGES RESPONSE  (HTTP ${inboxRes.status}):`, J(await inboxRes.json()));
