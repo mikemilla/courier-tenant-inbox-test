@@ -5,7 +5,7 @@
 // 3. Issues a JWT for the user, logs it, and decodes it.
 // 4. Fetches the user's inbox from the inbox GraphQL API.
 //
-// Every call prints its request and response. Run with: npm run delivery-test
+// Every call prints its request and response. Run with: npm test
 
 const API_KEY = "pk_CRRRYD4XM9MV6MM8VCG66FXJNDH0";
 const TEMPLATE_ID = "nt_01ktc9s2gtf6bv471bjp2af1r4";

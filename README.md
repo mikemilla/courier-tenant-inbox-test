@@ -16,7 +16,7 @@ It walks through four Courier API calls and prints the request + response for ea
 ## Usage
 
 ```bash
-npm run delivery-test
+npm test
 ```
 
 (or run it directly: `node tenant-delivery-test.js`)

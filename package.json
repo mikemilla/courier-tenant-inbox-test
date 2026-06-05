@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Single fetch-only script exercising the Courier tenant inbox flow (no SDK).",
   "scripts": {
-    "delivery-test": "node tenant-delivery-test.js"
+    "test": "node tenant-delivery-test.js"
   }
 }
