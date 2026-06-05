@@ -21,10 +21,12 @@ npm install   # installs Jest (dev dependency)
 npm test      # runs the Jest test suite
 ```
 
-There are two test files. Each always **reads the inbox with a tenant + user_id** (`params.accountId = tenantId`, the way `courier-react` reads in a tenanted app) and varies **how the message was sent**. Each scenario uses its own fresh random `user_id`:
+The two **core** files cover the central question — each always **reads the inbox with a tenant + user_id** (`params.accountId = tenantId`, the way `courier-react` reads in a tenanted app) and varies **how the message was sent**. Each scenario uses its own fresh random `user_id`:
 
 - [tenant-delivery.test.js](tenant-delivery.test.js) — the raw flow (create → send → status → tenant+user read).
 - [courier-react-parity.test.js](courier-react-parity.test.js) — same flow, but issues the inbox read **byte-identically to `courier-react`** (query builder, `tenantId → accountId` map, endpoint, JWT + `x-courier-client-key` + `x-courier-client-source-id` headers) and runs it live.
+
+Four more files broaden coverage (isolation, send-path diagnostics, read completeness, feature surface) — see [Additional coverage](#additional-coverage) below.
 
 ## Expected behavior
 
@@ -49,6 +51,43 @@ Both test files agree (one A + one B each → 2 fail, 2 pass).
 The message-status poll confirms scenario A's message **is** tagged to the tenant at the message level (`accountId: "sample-tenant"`). But the tenant+user read still returns `0`, because the **inbox-stored copy persists `accountId: null`** — so the `params.accountId = sample-tenant` filter matches nothing. (Scenario B happens to pass for the same underlying reason: its message also stores `accountId: null`, and the tenant filter correctly excludes it.)
 
 So the Send pipeline associates the message with the tenant, but **inbox ingest doesn't carry `accountId` through** for Send-API/template messages. Scenario A is an intentional **known-failing** assertion — it encodes the desired behavior and serves as a regression check for when inbox ingest propagates `accountId`.
+
+## Additional coverage
+
+Beyond the two core scenarios above, the suite covers the wider tenant-inbox contract. Shared helpers live in [courier-helpers.js](courier-helpers.js) (grounded in `@trycourier/courier-js`: the inbox read query, the `read`/`unread`/`archive` `TrackEvent` mutations, the `FilterParamsInput` fields, and the headers).
+
+### Isolation — the core tenant guarantee · [tenant-isolation.test.js](tenant-isolation.test.js)
+
+| # | Scenario | Expected |
+|---|----------|:--------:|
+| 1 | Sent to tenant **T1**, read with tenant **T2** | `0` — no cross-tenant leak |
+| 2 | Sent to **userA** + tenant, read as **userB** + tenant | `0` — user isolation |
+| 3 | userA's JWT but `x-courier-user-id: userB` | no rows returned — header can't override the JWT |
+
+These assert the *negative* (must not leak). They pass today partly because of the `accountId: null` ingest gap, but remain the correct guards once that gap is fixed.
+
+### Send-path diagnostic · [send-paths.test.js](send-paths.test.js)
+
+Probes whether **any** way of tagging the tenant at send time persists `accountId` on the inbox copy — `context.tenant_id`, `to.tenant_id`, and user→tenant **membership** (`PUT /users/{id}/tenants/{tenant}`). For each it reports `status.accountId`, the **stored** `node.accountId` (read with no filter), and the tenant read count. If any path stores a non-null `accountId`, that's the fix/workaround for the gap.
+
+### Read completeness · [inbox-completeness.test.js](inbox-completeness.test.js)
+
+| # | Scenario | Expected | Note |
+|---|----------|:--------:|------|
+| 4 | Sent WITH tenant, read with **no** tenant filter | `0` | Chosen contract: an untenanted read excludes tenant messages. Known-failing today (returns 1). |
+| 5 | **2** messages to one user + tenant, tenant read | `2` | Counting. Known-failing today (returns 0). |
+| 6 | One user in **two** tenants, read each | `1` each, only its own | Known-failing today (returns 0). |
+
+### Feature surface · [inbox-features.test.js](inbox-features.test.js)
+
+Exercised on the **working** (no-tenant) path so they're independent of the scoping gap:
+
+- **read / unread** — `TrackEvent` `read`/`unread` mutation toggles `node.read` and the `status: read|unread` filter.
+- **archive** — archived messages leave the default list and appear under `params.archived: true`.
+- **pagination** — `limit` + `after` cursor walks the list via `pageInfo.startCursor` / `hasNextPage`.
+- **auth** — an invalid JWT returns no rows (rejected).
+
+> The tenant-positive cases (#4–6, isolation post-fix) are **known-failing** regression checks tied to the same `accountId` ingest gap; the feature and isolation-negative cases are expected to pass. Run `npm test` for the current live results.
 
 ## Configuration
 
