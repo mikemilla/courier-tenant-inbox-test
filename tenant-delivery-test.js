@@ -100,7 +100,6 @@ const query = `query GetInboxMessages($params: FilterParamsInput, $limit: Int = 
   }
 }`;
 const variables = {
-  // [HACK] map tenantId to accountId in order to keep this backwards compatible
   params: { accountId: TENANT_ID },
   limit: 50,
 };
