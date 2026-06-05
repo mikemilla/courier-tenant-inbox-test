@@ -11,13 +11,15 @@ It walks through four Courier API calls and prints the request + response for ea
 
 ## Requirements
 
-- Node 18+ (uses the built-in global `fetch`). No `npm install` — there are no dependencies.
+- Node 18+ (uses the built-in global `fetch`). There are **no dependencies** — `npm install` isn't needed.
 
 ## Usage
 
 ```bash
-node tenant-delivery-test.js
+npm run delivery-test
 ```
+
+(or run it directly: `node tenant-delivery-test.js`)
 
 Each run uses a fresh random `user_id`, so you'll see the sent message show up in step 4 (`totalCount: 1`).
 
