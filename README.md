@@ -2,6 +2,26 @@
 
 A fetch-only Jest suite ([tenant-inbox.test.js](tenant-inbox.test.js)) that runs the same tenant-inbox scenarios against **dev and prod** in one go. Run with `npm test` (or `COURIER_ENVS=dev|prod npm test`).
 
+## Running the examples
+
+Two runnable demos exercise the **same** send-with-tenant → read flow through the real Courier SDKs. Both default to **dev** (which has the `accountId`-ingest fix) and reuse the suite's template/tenant.
+
+**[courier-js-sdk-demo/](courier-js-sdk-demo/)** — a Node script that sends to a `user_id` tagged with the tenant, then reads the inbox through `@trycourier/courier-js`'s `CourierClient.inbox.getMessages()` twice: once **with** a tenant (`new CourierClient({ ..., tenantId })`, mapped to `params.accountId`) and once **without**.
+
+```bash
+cd courier-js-sdk-demo
+npm install
+npm start            # COURIER_ENV=prod npm start to hit prod
+```
+
+**[react-inbox-app/](react-inbox-app/)** — a Vite + React (TypeScript) app rendering the same flow with `@trycourier/courier-react`'s `<CourierInbox/>`. It signs in `mike` with a hardcoded client JWT and a checkbox toggles whether `signIn()` passes `tenantId` (tenant-scoped vs unscoped read). `mike`'s inbox is pre-seeded with 3 tenant-tagged + 5 untenanted messages, so the toggle shows 3 (tenant on) vs all 8 (tenant off).
+
+```bash
+cd react-inbox-app
+npm install
+npm run dev          # http://localhost:5174
+```
+
 ## The issue
 
 A message sent to a `user_id` **within a tenant** was not visible to a tenant-scoped inbox read. The message was tagged to the tenant at the message level (`status.accountId = "sample-tenant"`), but the **inbox-stored copy persisted `accountId: null`** — so a read filtering on `params.accountId` (the way `courier-react` reads, mapping its `tenantId` prop to `accountId`) matched nothing and returned zero messages.

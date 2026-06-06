@@ -1,0 +1,13 @@
+{
+  "name": "courier-js-sdk-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Send a tenant+user message, then read the inbox with the @trycourier/courier-js SDK (with tenant and without).",
+  "scripts": {
+    "start": "node inbox-tenant.mjs"
+  },
+  "dependencies": {
+    "@trycourier/courier-js": "3.4.0"
+  }
+}
